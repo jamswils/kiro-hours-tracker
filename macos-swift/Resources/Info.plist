@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>CFBundleName</key>
+        <string>Kiro Sessions Inspector</string>
+        <key>CFBundleDisplayName</key>
+        <string>Kiro Sessions Inspector</string>
+        <key>CFBundleIdentifier</key>
+        <string>dev.kiro.sessions-inspector</string>
+        <key>CFBundleVersion</key>
+        <string>0.1.0</string>
+        <key>CFBundleShortVersionString</key>
+        <string>0.1.0</string>
+        <key>CFBundlePackageType</key>
+        <string>APPL</string>
+        <key>CFBundleExecutable</key>
+        <string>KiroSessionsInspector</string>
+        <key>CFBundleIconFile</key>
+        <string>AppIcon</string>
+        <key>CFBundleIconName</key>
+        <string>AppIcon</string>
+        <key>CFBundleInfoDictionaryVersion</key>
+        <string>6.0</string>
+        <key>CFBundleSupportedPlatforms</key>
+        <array>
+            <string>MacOSX</string>
+        </array>
+        <key>LSMinimumSystemVersion</key>
+        <string>14.0</string>
+        <key>LSApplicationCategoryType</key>
+        <string>public.app-category.developer-tools</string>
+        <key>NSHighResolutionCapable</key>
+        <true />
+        <key>NSSupportsAutomaticGraphicsSwitching</key>
+        <true />
+        <key>NSPrincipalClass</key>
+        <string>NSApplication</string>
+    </dict>
+</plist>

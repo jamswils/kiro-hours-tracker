@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj/
+DerivedData/
+.DS_Store
+
+# Intermediate icon artifacts (AppIcon.icns is committed; iconsets are throwaway).
+Resources/*.iconset/
