@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "server": "npx tsx server/index.ts",
-    "start": "concurrently \"npx tsx server/index.ts\" \"npm run dev\"",
+    "start": "concurrently \"npx tsx server/index.ts\" \"pnpm run dev\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
@@ -40,5 +40,6 @@
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
     "vite": "^8.0.10"
-  }
+  },
+  "packageManager": "pnpm@9.15.9"
 }

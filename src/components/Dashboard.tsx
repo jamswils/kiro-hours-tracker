@@ -75,7 +75,7 @@ interface DashboardData {
 // ---------------------------------------------------------------------------
 // Preferences (persisted to localStorage)
 // ---------------------------------------------------------------------------
-const API = "http://localhost:3001/api";
+const API = "/api";
 const HOURS_THRESHOLD = 10;
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DAY_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];

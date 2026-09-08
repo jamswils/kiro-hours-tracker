@@ -5,10 +5,15 @@ import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { execFile } from "child_process";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 const app = express();
-app.use(cors());
+// CORS: only needed when the UI is served from a different origin (Vite dev
+// server without the /api proxy). Scoped to explicit localhost origins —
+// never a wildcard, because responses contain full session transcripts.
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+app.use(cors({ origin: ALLOWED_ORIGINS }));
 
 // ---------------------------------------------------------------------------
 // Platform-aware path resolution
@@ -165,7 +170,14 @@ function loadExecutionsForWorkspace(workspacePath: string): Map<string, any> {
 
 app.get("/api/workspaces/:workspaceId/sessions/:sessionId", (req, res) => {
   const { workspaceId, sessionId } = req.params;
-  const sessionFile = path.join(SESSIONS_DIR, workspaceId, `${sessionId}.json`);
+  // Containment: both params come from the URL. Resolve the final path and
+  // require it to stay inside SESSIONS_DIR — otherwise `..` segments give
+  // arbitrary file read of any *.json on the machine.
+  const sessionFile = path.resolve(SESSIONS_DIR, workspaceId, `${sessionId}.json`);
+  if (!sessionFile.startsWith(path.resolve(SESSIONS_DIR) + path.sep)) {
+    res.status(400).json({ error: "Invalid session path" });
+    return;
+  }
   try {
     const data = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
     const workspacePath = data.workspaceDirectory || "";
@@ -292,10 +304,13 @@ function triggerDashboardScan() {
     }
   }
 
-  // Resolve tsx register path for the subprocess
+  // Resolve tsx register path for the subprocess.
+  // pathToFileURL produces a valid file:/// URL on every platform — the old
+  // `file://${path}` template emitted file://C:/... on Windows, which Node's
+  // ESM loader rejects, silently leaving the dashboard at zeros.
   const tsxRegister = path.join(projectDir, "node_modules", "tsx", "dist", "loader.mjs");
   const rawArgs = [
-    "--import", `file://${tsxRegister.replace(/\\/g, "/")}`,
+    "--import", pathToFileURL(tsxRegister).href,
     workerPath, GLOBAL_STORAGE, SESSIONS_DIR, ...extraSources
   ];
   console.log(`[dashboard] starting scan subprocess with ${extraSources.length} extra source(s)`);
@@ -342,4 +357,8 @@ app.get("/api/dashboard", (_req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 const PORT = Number(process.env.PORT) || 3001;
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+// Bind loopback ONLY. Responses carry full session transcripts and tool
+// output; this must never be reachable from the network. Set HOST explicitly
+// if you genuinely need otherwise.
+const HOST = process.env.HOST || "127.0.0.1";
+app.listen(PORT, HOST, () => console.log(`Server running on http://${HOST}:${PORT}`));

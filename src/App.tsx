@@ -31,7 +31,7 @@ export interface SessionDetail {
   history: { role: string; content: string; executionId?: string; actions?: Action[]; cost?: number }[];
 }
 
-const API = "http://localhost:3001/api";
+const API = "/api";
 
 function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
