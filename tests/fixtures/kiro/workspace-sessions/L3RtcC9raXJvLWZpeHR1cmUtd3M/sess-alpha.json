@@ -1,0 +1,26 @@
+{
+  "sessionId": "sess-alpha",
+  "title": "Alpha session",
+  "sessionType": "chat",
+  "autonomyMode": "autopilot",
+  "selectedModel": "model-x",
+  "workspaceDirectory": "/tmp/kiro-fixture-ws",
+  "contextUsagePercentage": 41,
+  "history": [
+    {
+      "executionId": "aaaaaaaa1111",
+      "message": { "role": "user", "content": "list the files" }
+    },
+    {
+      "executionId": "aaaaaaaa1111",
+      "message": {
+        "role": "assistant",
+        "content": [
+          { "type": "text", "text": "Here they are." },
+          { "type": "thinking", "text": "ignored" },
+          { "type": "text", "text": "Two files." }
+        ]
+      }
+    }
+  ]
+}

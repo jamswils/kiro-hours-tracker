@@ -1,18 +1,57 @@
-// Independent cross-check of /api/dashboard output. Reads live + export
-// stores, computes active & raw totals + peak concurrency, fetches the
-// running server, and asserts the two agree within tolerance.
+// Independent cross-check of /api/dashboard output. Reads the live Kiro store
+// (+ any exported archives), computes active & raw totals + peak concurrency,
+// fetches the running server, and asserts the two agree within tolerance.
 //
-// Run with: node scripts/verify-scan.mjs  (or `npm run verify`)
+// Deliberately a SECOND implementation of the Kiro maths: it exists to catch a
+// regression in server/stores/kiro-fs.ts, so it must not import from it.
+//
+// Exit codes:
+//   0  totals agree within tolerance
+//   1  totals disagree
+//   2  cannot verify (store missing, server unreachable, bad response)
+//
+// It never exits 0 without having compared real numbers — a vacuous pass is
+// worse than a failure, because it looks like proof.
+//
+// Run with: node scripts/verify-scan.mjs  (or `pnpm run verify`)
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
 
-const LIVE_GLOBAL = process.env.KIRO_GLOBAL_STORAGE
-  || path.join(
-    process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"),
-    "Kiro", "User", "globalStorage", "kiro.kiroagent",
-  );
+const EXIT_OK = 0;
+const EXIT_MISMATCH = 1;
+const EXIT_CANNOT_VERIFY = 2;
+
+function cannotVerify(reason, hint) {
+  console.error(`\nCANNOT VERIFY: ${reason}`);
+  if (hint) console.error(`  ${hint}`);
+  process.exit(EXIT_CANNOT_VERIFY);
+}
+
+// Platform-aware default, mirroring resolveKiroGlobalStorage() in
+// server/stores/kiro-fs.ts. The previous hardcoded %APPDATA% path resolved to
+// a nonexistent directory on macOS and Linux, where the scan then found zero
+// executions and every comparison trivially "passed".
+function resolveLiveGlobalStorage() {
+  if (process.env.KIRO_GLOBAL_STORAGE) return process.env.KIRO_GLOBAL_STORAGE;
+  const home = os.homedir();
+  switch (process.platform) {
+    case "win32": {
+      const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+      return path.join(appData, "Kiro", "User", "globalStorage", "kiro.kiroagent");
+    }
+    case "darwin":
+      return path.join(
+        home, "Library", "Application Support", "Kiro", "User", "globalStorage", "kiro.kiroagent",
+      );
+    default:
+      return path.join(home, ".config", "Kiro", "User", "globalStorage", "kiro.kiroagent");
+  }
+}
+
+const LIVE_GLOBAL = resolveLiveGlobalStorage();
+const SERVER_URL = process.env.VERIFY_SERVER_URL || "http://127.0.0.1:3001";
 const EXPORT_CANDIDATES = [
   path.resolve(process.cwd(), "KiroData-Export(1)", "KiroData-Export"),
   path.resolve(process.cwd(), "..", "..", "kiro-sessions-inspector", "KiroData-Export(1)", "KiroData-Export"),
@@ -152,10 +191,38 @@ function scanSource(GLOBAL, label, out, seen) {
 
 function fmtH(ms) { return (ms / 3_600_000).toFixed(2) + "h"; }
 
+// ---------------------------------------------------------------------------
+// Preconditions. Each one exits 2 rather than letting the run pass on nothing.
+// ---------------------------------------------------------------------------
+const requestedStore = (process.env.KIRO_STORE || "auto").trim().toLowerCase();
+if (requestedStore === "kirocrew") {
+  cannotVerify(
+    "KIRO_STORE=kirocrew, but this verifier only re-implements the Kiro IDE maths.",
+    "Run it against the Kiro store (KIRO_STORE=kiro) or extend it for KiroCrew first.",
+  );
+}
+
+const liveSessionsDir = path.join(LIVE_GLOBAL, "workspace-sessions");
+const availableExports = EXPORT_CANDIDATES.filter((c) => fs.existsSync(c));
+if (!fs.existsSync(liveSessionsDir) && availableExports.length === 0) {
+  cannotVerify(
+    `no Kiro store found. Missing session directory: ${liveSessionsDir}`,
+    "Set KIRO_GLOBAL_STORAGE to the Kiro globalStorage directory, or place an export "
+    + "at ./KiroData-Export(1)/KiroData-Export.",
+  );
+}
+
 const execs = [];
 const seen = new Set();
 scanSource(LIVE_GLOBAL, "live", execs, seen);
-for (const c of EXPORT_CANDIDATES) if (fs.existsSync(c)) scanSource(c, "export", execs, seen);
+for (const c of availableExports) scanSource(c, "export", execs, seen);
+
+if (execs.length === 0) {
+  cannotVerify(
+    `found the store at ${LIVE_GLOBAL} but read 0 executions from it.`,
+    "Nothing to cross-check, so a match would prove nothing. Check permissions and layout.",
+  );
+}
 
 const sessTimeRaw = execs.reduce((s, e) => s + (e.endRaw - e.start), 0);
 const sessTimeActive = execs.reduce((s, e) => s + Math.max(0, e.endActive - e.start), 0);
@@ -164,19 +231,52 @@ const wallActive = mergeIntervals(execs.map(e => [e.start, Math.max(e.start, e.e
 const peakRaw = peakParallel(execs.map(e => [e.start, e.endRaw]));
 const peakAct = peakParallel(execs.map(e => [e.start, Math.max(e.start, e.endActive)]));
 
-console.log("Local rescan:");
+console.log(`Local rescan (${LIVE_GLOBAL}):`);
 console.log("  execs:                ", execs.length);
 console.log("  sessTime raw/active:  ", fmtH(sessTimeRaw), "/", fmtH(sessTimeActive));
 console.log("  wallClock raw/active: ", fmtH(wallRaw), "/", fmtH(wallActive));
 console.log("  peak parallel R/A:    ", peakRaw, "/", peakAct);
 
 let res = null;
-try { res = await fetch("http://localhost:3001/api/dashboard"); } catch { /* ignore */ }
-if (!res) {
-  console.log("\nServer not reachable. Start it with `npm run start` then re-run.");
-  process.exit(0);
+let fetchError = null;
+try {
+  res = await fetch(`${SERVER_URL}/api/dashboard`);
+} catch (e) {
+  fetchError = e instanceof Error ? e.message : String(e);
 }
-const d = await res.json();
+if (!res) {
+  cannotVerify(
+    `server not reachable at ${SERVER_URL} (${fetchError}).`,
+    "Start it with `pnpm run server` (or `pnpm run start`) and re-run.",
+  );
+}
+if (!res.ok) {
+  cannotVerify(
+    `server returned HTTP ${res.status} for ${SERVER_URL}/api/dashboard.`,
+    "The backend is up but not serving the dashboard payload.",
+  );
+}
+
+let d = null;
+try {
+  d = await res.json();
+} catch (e) {
+  cannotVerify(
+    `server response was not JSON (${e instanceof Error ? e.message : String(e)}).`,
+  );
+}
+if (!d || typeof d.totalExecutions !== "number") {
+  cannotVerify(
+    "server response has no totalExecutions — not a dashboard payload.",
+  );
+}
+if (d.scanning && d.lastUpdated === 0) {
+  cannotVerify(
+    "the server's first scan has not finished yet (scanning=true, lastUpdated=0).",
+    "Wait a few seconds and re-run.",
+  );
+}
+
 console.log("\nServer /api/dashboard:");
 console.log("  totalExecutions:      ", d.totalExecutions);
 console.log("  totalExecTimeMs raw/A:", fmtH(d.totalExecTimeMsRaw || 0), "/", fmtH(d.totalExecTimeMs));
@@ -193,8 +293,9 @@ if (peakRaw !== (d.peakParallelRaw || 0)) mismatches.push("peakRaw " + peakRaw +
 if (peakAct !== (d.peakParallelActive || 0)) mismatches.push("peakActive " + peakAct + " vs " + (d.peakParallelActive || 0));
 
 if (mismatches.length) {
-  console.log("\n*** Mismatches ***");
-  for (const m of mismatches) console.log("  " + m);
-  process.exit(1);
+  console.error("\n*** Mismatches ***");
+  for (const m of mismatches) console.error("  " + m);
+  process.exit(EXIT_MISMATCH);
 }
-console.log("\nAll totals match within tolerance.");
+console.log(`\nAll totals match within tolerance (${execs.length} executions compared).`);
+process.exit(EXIT_OK);

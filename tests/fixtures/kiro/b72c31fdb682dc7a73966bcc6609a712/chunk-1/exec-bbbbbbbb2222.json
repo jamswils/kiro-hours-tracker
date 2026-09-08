@@ -1,0 +1,25 @@
+{
+  "executionId": "bbbbbbbb2222",
+  "chatSessionId": "sess-beta",
+  "status": "aborted",
+  "autonomyMode": "supervised",
+  "startTime": 1700000300000,
+  "endTime": 1700007200000,
+  "usageSummary": [{ "modelId": "model-y", "usage": 3.25 }],
+  "actions": [
+    {
+      "actionType": "fsWrite",
+      "actionState": "done",
+      "emittedAt": 1700000500000,
+      "input": { "path": "/tmp/kiro-fixture-ws/parser.ts" },
+      "output": "written"
+    },
+    {
+      "actionType": "executeBash",
+      "actionState": "done",
+      "emittedAt": 1700000900000,
+      "input": { "command": "pnpm test" },
+      "output": "1 failed"
+    }
+  ]
+}

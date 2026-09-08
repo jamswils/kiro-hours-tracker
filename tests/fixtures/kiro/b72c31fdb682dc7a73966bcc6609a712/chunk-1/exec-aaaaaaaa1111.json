@@ -1,0 +1,28 @@
+{
+  "executionId": "aaaaaaaa1111",
+  "chatSessionId": "sess-alpha",
+  "status": "succeed",
+  "startTime": 1700000000000,
+  "endTime": 1700000600000,
+  "usageSummary": [
+    { "modelId": "model-x", "usage": 1.5 },
+    { "modelId": "model-x", "usage": 0.5 }
+  ],
+  "actions": [
+    { "actionType": "intentClassification", "actionState": "done", "emittedAt": 1700000010000 },
+    {
+      "actionType": "fsRead",
+      "actionState": "done",
+      "emittedAt": 1700000120000,
+      "input": { "path": "/tmp/kiro-fixture-ws/a.txt" },
+      "output": "contents of a"
+    },
+    {
+      "actionType": "executeBash",
+      "actionState": "done",
+      "emittedAt": 1700000480000,
+      "input": { "command": "ls" },
+      "output": "a.txt b.txt"
+    }
+  ]
+}

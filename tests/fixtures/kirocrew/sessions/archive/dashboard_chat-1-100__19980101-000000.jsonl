@@ -1,0 +1,2 @@
+{"_type": "metadata", "created_at": "1998-01-01T00:00:00.000000+00:00", "title": "MUST NOT BE READ - archived rotation", "project": "/tmp/should-never-appear-archive"}
+{"role": "user", "content": "old content", "ts": "1998-01-01T00:01:00.000000+00:00", "meta": {"mid": "old1"}}
