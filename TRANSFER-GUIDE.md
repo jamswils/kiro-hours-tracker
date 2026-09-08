@@ -105,7 +105,11 @@ Write-Host "Total size: $([math]::Round((Get-ChildItem $p -Recurse | Measure-Obj
 
 **macOS/Linux (bash):**
 ```bash
-p="$HOME/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent"
+if [ "$(uname)" = "Darwin" ]; then
+  p="$HOME/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent"
+else
+  p="$HOME/.config/Kiro/User/globalStorage/kiro.kiroagent"
+fi
 echo "Path: $p"
 echo "Exists: $(test -d "$p" && echo yes || echo no)"
 echo "Workspaces: $(ls "$p/workspace-sessions" | wc -l)"

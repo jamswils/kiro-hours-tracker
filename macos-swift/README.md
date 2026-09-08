@@ -9,7 +9,7 @@ overview. This directory is self-contained for the Swift build.
 
 ## Requirements
 
-- macOS 13 or later
+- macOS 14 or later (`Package.swift` declares `platforms: [.macOS(.v14)]`)
 - Swift 5.9+ (Xcode 15 or `swift` from the toolchain)
 
 ## Run

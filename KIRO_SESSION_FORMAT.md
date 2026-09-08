@@ -6,7 +6,21 @@ Kiro IDE stores session data across multiple locations and formats. The chat his
 
 ## Storage Locations
 
-Base path: `~/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/`
+Base path is platform-dependent. The backend resolves it in
+`resolveGlobalStorage()` (`server/index.ts`):
+
+| Platform | Base path |
+|---|---|
+| macOS | `~/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/` |
+| Windows | `%APPDATA%\Kiro\User\globalStorage\kiro.kiroagent\` (falls back to `%USERPROFILE%\AppData\Roaming` when `APPDATA` is unset) |
+| Linux / other | `~/.config/Kiro/User/globalStorage/kiro.kiroagent/` |
+
+The `KIRO_GLOBAL_STORAGE` environment variable overrides all three. The Linux
+path is the `default:` branch of the platform switch — it is the conventional
+XDG location rather than a path verified against a Linux Kiro install, so set
+`KIRO_GLOBAL_STORAGE` explicitly if your install differs.
+
+All relative paths below are rooted at whichever base path applies.
 
 ### 1. Session Metadata — `workspace-sessions/`
 
@@ -21,8 +35,15 @@ workspace-sessions/
 
 **`sessions.json`** — Array of session summaries:
 ```json
-[{ "sessionId": "uuid", "title": "...", "dateCreated": "timestamp" }]
+[{ "sessionId": "uuid", "title": "...", "dateCreated": "1778371200000" }]
 ```
+
+**`dateCreated` may be a JSON string or a JSON number.** Observed files carry a
+UTC-milliseconds value quoted as a string, but readers must not rely on that:
+the TypeScript readers coerce with `Number(s.dateCreated)`, which accepts
+either. The Swift reader is stricter — `RawSessionSummary.dateCreated` is
+declared `String`, so a numeric `dateCreated` fails to decode there. Treat
+string-or-number as the contract and coerce on read.
 
 **`{sessionId}.json`** — Full session state:
 ```json
@@ -85,12 +106,47 @@ workspace-sessions/
   "actions": [...],                  // THE GOOD STUFF — tool calls, thinking, responses
   "context": [...],
   "result": { "status": "...", "executionId": "..." },
-  "usageSummary": {...},
+  "usageSummary": [                  // ARRAY, not an object — see below
+    { "usage": 1.234, "modelId": "claude-sonnet-4.5" }
+  ],
   "contextUsagePercentage": 45.2
 }
 ```
 
+**`usageSummary` is an ARRAY.** Every reader requires it: the Express API and
+the scan worker both guard with `Array.isArray(...)` and return a cost of `0`
+for anything else, and the Swift reader takes `arrayValue`. Credits are the sum
+of each element's `usage` field. An object here is silently costed as zero, not
+an error.
+
+#### `endTime` lags on aborted executions — clamp it
+
+For `status` of `aborted` or `user-aborted`, Kiro writes `endTime` when the
+session is torn down, not when work stopped, so it can overstate the execution
+by hours. Any reader computing durations must clamp it. The rule implemented in
+`effectiveEnd()` (`server/scan-worker.ts`) is:
+
+1. If `startTime` or `endTime` is missing/zero, use the raw `endTime`.
+2. If `status` is neither `aborted` nor `user-aborted`, use the raw `endTime`.
+3. Otherwise take the highest `emittedAt` across `actions[]`, add a 60 s grace
+   tail (`ABORTED_TAIL_GRACE_MS`), and clamp: `min(rawEnd, lastEmittedAt + 60s)`,
+   then floored at `startTime` so the result can never go negative.
+4. If no action carries an `emittedAt`, fall back to
+   `min(rawEnd, startTime + 60s)`.
+
+The grace tail covers the user reading the reply and hitting stop a few seconds
+later. Note the clamp only ever *reduces* the end time — it is a `min` against
+the raw value, never an extension. The backend keeps both figures (`end` and
+`endRaw`) so the UI can show active vs raw totals side by side.
+
 ### 3. `.chat` Files (Legacy/Alternative Format)
+
+> **Not parsed by any implementation in this repo.** Neither the Express
+> backend, the scan worker, the `verify-scan` script, nor the Swift app opens
+> `.chat` files — a repo-wide search for the extension returns no reader. The
+> format is recorded here because the files exist on disk, but no hours, credit
+> or session figure in either front-end includes them. Treat this section as
+> reference for a future reader, not as a description of current behaviour.
 
 Found in the same hash directories but with `.chat` extension. Simpler format used by some workflows:
 

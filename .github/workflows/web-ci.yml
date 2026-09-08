@@ -1,0 +1,63 @@
+name: Web CI
+
+# Lint, type-check, build and test the React + Express side of the repo.
+# The macOS Swift app is built and released by release.yml on tags, so pure
+# macos-swift/** changes are skipped here.
+
+on:
+  push:
+    paths-ignore:
+      - "macos-swift/**"
+  pull_request:
+    paths-ignore:
+      - "macos-swift/**"
+
+# Least privilege: this workflow only reads the repo. It publishes nothing.
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Must precede setup-node: `cache: pnpm` resolves the pnpm store path by
+      # invoking pnpm, so a pnpm shim has to exist first. packageManager in
+      # package.json pins the version corepack activates.
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      # Re-run after setup-node so the shims live in the Node 22 bin directory
+      # rather than the runner's preinstalled Node.
+      - name: Re-enable corepack for Node 22
+        run: corepack enable
+
+      - name: Show tool versions
+        run: |
+          node -v
+          pnpm -v
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # continue-on-error: the repo carries a pre-existing lint backlog that
+      # must not block CI. The step still runs and its report is visible in the
+      # log and as a failed-but-non-blocking check annotation.
+      - name: Lint
+        run: pnpm lint
+        continue-on-error: true
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
