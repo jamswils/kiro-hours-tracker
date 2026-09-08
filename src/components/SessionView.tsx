@@ -7,6 +7,51 @@ interface Props {
   session: SessionDetail;
 }
 
+// ---------------------------------------------------------------------------
+// Tolerant readers. A second store's tool records will not share Kiro's input
+// shapes: a field may be absent, a string where an array was expected, or an
+// array of plain strings where objects were expected. These helpers narrow
+// defensively so an unknown record degrades to its actionType name instead of
+// rendering blank or throwing (`input.files.map` on a string is a TypeError
+// that takes the whole session view down).
+// ---------------------------------------------------------------------------
+function firstString(...values: unknown[]): string | null {
+  for (const v of values) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+function pathList(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (!Array.isArray(value)) return null;
+  const parts = value
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") {
+        const rec = item as Record<string, unknown>;
+        return firstString(rec.path, rec.file, rec.filePath, rec.uri, rec.name) || "";
+      }
+      return "";
+    })
+    .filter((s) => s.length > 0);
+  return parts.length ? parts.join(", ") : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** Text of a message-bearing output, whether it is an object or a bare string. */
+function outputMessage(output: unknown): string {
+  if (typeof output === "string") return output;
+  const rec = asRecord(output);
+  if (!rec) return "";
+  return firstString(rec.message, rec.text, rec.content) || "";
+}
+
 function ActionIcon({ type }: { type: string }) {
   switch (type) {
     case "reasoning": return <Brain size={12} className="text-purple-400" />;
@@ -21,13 +66,29 @@ function ActionIcon({ type }: { type: string }) {
 
 function ActionLabel({ action }: { action: Action }) {
   const { actionType, input } = action;
+  // Every branch falls back to the actionType name, so an unrecognised record is
+  // still identifiable in the transcript.
+  const fallback = firstString(actionType) || "action";
+  const rec = asRecord(input);
+  if (!rec) return <>{fallback}</>;
+
   switch (actionType) {
-    case "runCommand": return <>{input?.command || "command"}</>;
-    case "readFiles": return <>{input?.files?.map((f: any) => f.path).join(", ") || "read"}</>;
-    case "search": return <>{input?.query || "search"}</>;
-    case "replace": case "write": case "create": return <>{input?.file || actionType}</>;
-    case "getDiagnostics": return <>{input?.paths?.join(", ") || "diagnostics"}</>;
-    default: return <>{actionType}</>;
+    case "runCommand":
+      return <>{firstString(rec.command, rec.cmd) || fallback}</>;
+    case "readFiles":
+      return <>{pathList(rec.files) || pathList(rec.paths) || firstString(rec.path) || fallback}</>;
+    case "search":
+      return <>{firstString(rec.query, rec.pattern) || fallback}</>;
+    case "replace": case "write": case "create":
+      return <>{firstString(rec.file, rec.path, rec.filePath) || fallback}</>;
+    case "getDiagnostics":
+      return <>{pathList(rec.paths) || fallback}</>;
+    default: {
+      // Unknown actionType: name the type, and add the most recognisable scalar
+      // in its input when one is present.
+      const detail = firstString(rec.command, rec.path, rec.file, rec.query, rec.name, rec.target, rec.url);
+      return <>{fallback}{detail ? ` · ${detail}` : ""}</>;
+    }
   }
 }
 
@@ -35,7 +96,7 @@ function ActionBlock({ action }: { action: Action }) {
   const [expanded, setExpanded] = useState(false);
   const isThinking = action.actionType === "reasoning";
   const isSay = action.actionType === "say";
-  const message = action.output?.message || "";
+  const message = outputMessage(action.output);
 
   if (isSay) {
     return (
@@ -113,7 +174,7 @@ export function SessionView({ session }: Props) {
       </div>
 
       <div className="space-y-4">
-        {session.history.map((msg, i) => (
+        {(Array.isArray(session.history) ? session.history : []).map((msg, i) => (
           <div
             key={i}
             className={clsx(
