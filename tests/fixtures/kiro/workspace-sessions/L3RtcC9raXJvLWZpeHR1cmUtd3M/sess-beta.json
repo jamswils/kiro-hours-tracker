@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess-beta",
+  "title": "Beta session",
+  "sessionType": "spec",
+  "autonomyMode": "supervised",
+  "defaultModelTitle": "model-y",
+  "workspaceDirectory": "/tmp/kiro-fixture-ws",
+  "history": [
+    {
+      "executionId": "bbbbbbbb2222",
+      "message": { "role": "user", "content": "refactor the parser" }
+    }
+  ]
+}

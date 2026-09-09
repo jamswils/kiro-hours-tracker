@@ -1,0 +1,36 @@
+{
+  /* Type-checks the Express backend in server/. Not part of `tsc -b`: the
+     server is executed by tsx (never emitted), so this project is noEmit and
+     is run explicitly by the "typecheck" script. */
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.server.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Bundler mode — mirrors tsconfig.node.json. Chosen over NodeNext because
+       tsx resolves extensionless relative imports (./stores/store) while
+       NodeNext under "type": "module" would demand explicit .js suffixes that
+       the runtime code does not use. */
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "esModuleInterop": true,
+    "noEmit": true,
+
+    /* Linting — strict:true type-checks the current server/ tree with zero
+       errors. noUnusedLocals / noUnusedParameters are deliberately NOT set
+       here: they only reproduce four pre-existing dead symbols in server/
+       (index.ts `child`, scan-worker.ts `sourceLabel`, `readFullExecFiles`,
+       `foundIndex`) that ESLint already reports via
+       @typescript-eslint/no-unused-vars in the `lint` step, so enabling them
+       would make `typecheck` red for reasons that are not type errors. */
+    "strict": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["server"]
+}

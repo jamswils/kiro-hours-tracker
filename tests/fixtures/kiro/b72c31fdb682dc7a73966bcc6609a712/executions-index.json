@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "executions": [
+    {
+      "executionId": "aaaaaaaa1111",
+      "startTime": 1700000000000,
+      "endTime": 1700000600000,
+      "status": "succeed"
+    },
+    {
+      "executionId": "bbbbbbbb2222",
+      "startTime": 1700000300000,
+      "endTime": 1700007200000,
+      "status": "aborted"
+    }
+  ]
+}

@@ -50,6 +50,8 @@ interface LongExecution {
   executionId: string;
   sessionId: string;
   source: string;
+  status?: string;           // present when the server forwards it; badge is
+                             // simply omitted when it is absent
 }
 
 interface DashboardData {
@@ -75,8 +77,19 @@ interface DashboardData {
 // ---------------------------------------------------------------------------
 // Preferences (persisted to localStorage)
 // ---------------------------------------------------------------------------
-const API = "http://localhost:3001/api";
+const API = "/api";
 const HOURS_THRESHOLD = 10;
+// An execution longer than this is surfaced for audit in LongExecutionsPanel.
+// The server picks the same threshold when it builds data.longExecutions; this
+// constant exists so the heading never hardcodes a number that can drift.
+const LONG_EXECUTION_HOURS = 4;
+// Raw (unclamped) day total is highlighted once it exceeds the active total by
+// this factor — the signal that aborted runs are dominating that day.
+const RAW_VS_ACTIVE_FLAG_RATIO = 2;
+// Execution statuses that mean the run did not finish normally. Kiro writes
+// "aborted" / "user-aborted"; compared case-insensitively so a second store
+// using different casing still matches.
+const ABORTED_STATUSES = new Set(["aborted", "user-aborted", "userabort", "cancelled", "canceled"]);
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DAY_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const SCHEDULE_STORAGE_KEY = "kiro-inspector-schedule-v2";
@@ -198,6 +211,45 @@ function tzDateKey(tz: string, ts: number): string {
 
 function tzTodayKey(tz: string): string {
   return tzDateKey(tz, Date.now());
+}
+
+// ---------------------------------------------------------------------------
+// Day-key arithmetic — deliberately UTC-only.
+//
+// A day KEY ("2026-09-08") is produced above in the user's CONFIGURED zone and
+// is just a label from that point on. Every calendar/weekday/ISO-week
+// computation below therefore treats the key as UTC midnight and uses getUTC*
+// accessors, so the browser's own zone can never shift a bucket: a Perth
+// dataset lays out identically whether it is read from Perth, London or UTC.
+// (Using `new Date(y, m-1, d)` here — as this file previously did — resolves the
+// key in the BROWSER's zone, which silently moves weekday and week boundaries.)
+// UTC has no DST, so adding 86_400_000 ms is always exactly one day.
+// ---------------------------------------------------------------------------
+const MS_PER_DAY = 86_400_000;
+
+function dayKeyToUtcMs(dateKey: string): number {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+
+function utcMsToDayKey(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+function addUtcDays(ms: number, days: number): number {
+  return ms + days * MS_PER_DAY;
+}
+
+/** Weekday (0=Sunday) of a day key, resolved in UTC — never browser-local. */
+function dayKeyWeekday(dateKey: string): number {
+  return new Date(dayKeyToUtcMs(dateKey)).getUTCDay();
+}
+
+/** True when an execution's status means the run did not finish normally. */
+function isAborted(status?: string): boolean {
+  if (!status) return false;
+  return ABORTED_STATUSES.has(status.trim().toLowerCase());
 }
 
 function formatTimeInTz(ts: number, tz: string, locale: string): string {
@@ -338,8 +390,9 @@ function computeDailyStats(
   const ensure = (date: string): DailyStats => {
     let d = byDay.get(date);
     if (!d) {
-      const [y, m, day] = date.split("-").map(Number);
-      const weekday = new Date(y, m - 1, day).getDay();
+      // UTC weekday: the key was already resolved in the configured tz, so the
+      // browser's zone must not get a second vote.
+      const weekday = dayKeyWeekday(date);
       d = {
         date, weekday,
         sessionCount: 0, executionCount: 0, credits: 0,
@@ -365,12 +418,20 @@ function computeDailyStats(
       const list = intervalsByDay.get(seg.day) || [];
       list.push([seg.start, seg.end]);
       intervalsByDay.set(seg.day, list);
-      const d = ensure(seg.day);
-      d.executionCount++;
+      // Make sure the day exists so its clipped time is still reported, but do
+      // NOT increment the execution count here.
+      ensure(seg.day);
     }
     if (segs.length > 0) {
-      ensure(segs[0].day).executions.push(e);
-      if (e.credits > 0) ensure(segs[0].day).credits += e.credits;
+      // One execution is counted ONCE, on the day it started. Incrementing per
+      // segment made a run that crossed midnight appear as two executions and
+      // inflated the daily/weekly counts, while its credits and its detail row
+      // were already attributed to segs[0] only. Counting at segs[0] keeps the
+      // count, the credits and the detail list describing the same thing.
+      const startDay = ensure(segs[0].day);
+      startDay.executionCount++;
+      startDay.executions.push(e);
+      if (e.credits > 0) startDay.credits += e.credits;
     }
   }
 
@@ -414,24 +475,23 @@ function computeDailyStats(
 // Heat map builder (tz-aware)
 // ---------------------------------------------------------------------------
 function buildCalendar(dailyMap: Map<string, DailyStats>, months: number, tz: string): DailyStats[][] {
-  const todayKey = tzTodayKey(tz);
-  const [ty, tm, td] = todayKey.split("-").map(Number);
-  const today = new Date(ty, tm - 1, td);
-  const startDate = new Date(today);
-  startDate.setMonth(startDate.getMonth() - months);
-  startDate.setDate(startDate.getDate() - startDate.getDay());
+  // All arithmetic in UTC on the day keys themselves: the heat map must lay out
+  // the same grid regardless of the browser's zone.
+  const todayMs = dayKeyToUtcMs(tzTodayKey(tz));
+  const t = new Date(todayMs);
+  // Date.UTC normalises an out-of-range month, so month - months rolls the year.
+  const windowStartMs = Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - months, t.getUTCDate());
+  // Back up to that week's Sunday so every column is a full week.
+  const startMs = addUtcDays(windowStartMs, -new Date(windowStartMs).getUTCDay());
 
   const weeks: DailyStats[][] = [];
   let currentWeek: DailyStats[] = [];
-  const cursor = new Date(startDate);
+  let cursor = startMs;
 
-  while (cursor <= today) {
-    const y = cursor.getFullYear();
-    const m = String(cursor.getMonth() + 1).padStart(2, "0");
-    const d = String(cursor.getDate()).padStart(2, "0");
-    const key = `${y}-${m}-${d}`;
+  while (cursor <= todayMs) {
+    const key = utcMsToDayKey(cursor);
     const entry = dailyMap.get(key) || {
-      date: key, weekday: cursor.getDay(),
+      date: key, weekday: new Date(cursor).getUTCDay(),
       sessionCount: 0, executionCount: 0, credits: 0,
       timeMs: 0, execTimeMs: 0, insideMs: 0, outsideMs: 0,
       firstStart: 0, lastEnd: 0, maxParallel: 0,
@@ -439,7 +499,7 @@ function buildCalendar(dailyMap: Map<string, DailyStats>, months: number, tz: st
     };
     currentWeek.push(entry);
     if (currentWeek.length === 7) { weeks.push(currentWeek); currentWeek = []; }
-    cursor.setDate(cursor.getDate() + 1);
+    cursor = addUtcDays(cursor, 1);
   }
   if (currentWeek.length > 0) weeks.push(currentWeek);
   return weeks;
@@ -460,19 +520,17 @@ function getHeatColor(timeMs: number): string {
 // Weekly roll-up
 // ---------------------------------------------------------------------------
 function getISOWeek(dateStr: string): { year: number; week: number; mondayStr: string } {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const dt = new Date(y, m - 1, d);
-  dt.setHours(0, 0, 0, 0);
-  const dow = (dt.getDay() + 6) % 7;
-  const monday = new Date(dt);
-  monday.setDate(dt.getDate() - dow);
-  const thursday = new Date(monday);
-  thursday.setDate(monday.getDate() + 3);
-  const week1 = new Date(thursday.getFullYear(), 0, 4);
-  const weekNum = 1 + Math.round(((thursday.getTime() - week1.getTime()) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7);
-  const ms = String(monday.getMonth() + 1).padStart(2, "0");
-  const ds = String(monday.getDate()).padStart(2, "0");
-  return { year: thursday.getFullYear(), week: weekNum, mondayStr: `${monday.getFullYear()}-${ms}-${ds}` };
+  // UTC throughout: in browser-local time a DST boundary makes the day-count
+  // division non-integral and can move a date into the neighbouring ISO week.
+  const dayMs = dayKeyToUtcMs(dateStr);
+  const dow = (new Date(dayMs).getUTCDay() + 6) % 7;   // Monday = 0
+  const mondayMs = addUtcDays(dayMs, -dow);
+  const thursdayMs = addUtcDays(mondayMs, 3);          // ISO week owns its Thursday
+  const isoYear = new Date(thursdayMs).getUTCFullYear();
+  const week1Ms = Date.UTC(isoYear, 0, 4);             // Jan 4 is always in week 1
+  const week1Dow = (new Date(week1Ms).getUTCDay() + 6) % 7;
+  const weekNum = 1 + Math.round(((thursdayMs - week1Ms) / MS_PER_DAY - 3 + week1Dow) / 7);
+  return { year: isoYear, week: weekNum, mondayStr: utcMsToDayKey(mondayMs) };
 }
 
 interface WeekSummary {
@@ -736,8 +794,8 @@ function OverviewTab({ data, schedule, dailyMap }: { data: DashboardData; schedu
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3">
         <TimeCard
-          title="Wall-clock time"
-          subtitle="Actual time at the keyboard (overlapping sessions merged)"
+          title="Active agent time"
+          subtitle="Union of execution intervals — not human presence"
           value={formatDuration(data.totalTimeMs)}
           icon={<Clock size={16} />}
           accent="accent"
@@ -867,20 +925,66 @@ function OverviewTab({ data, schedule, dailyMap }: { data: DashboardData; schedu
         </div>
       </div>
 
-      <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-4">
-        <h3 className="text-sm font-medium mb-3 text-[var(--text-secondary)]">Top workspaces</h3>
-        <div className="space-y-2">
-          {data.workspaces.slice(0, 12).map((ws) => (
-            <div key={ws.name} className="flex items-center gap-3 text-sm">
-              <FolderOpen size={14} className="text-[var(--text-secondary)] shrink-0" />
-              <span className="flex-1 truncate text-[var(--text-primary)]">{ws.name}</span>
-              <span className="text-xs text-[var(--text-secondary)]">{ws.sessions} sess</span>
-              <span className="text-xs text-[var(--text-secondary)] w-16 text-right">{ws.credits.toFixed(0)} cr</span>
-              <span className="text-sm font-medium w-16 text-right">{formatHours(ws.timeMs)}</span>
-            </div>
-          ))}
-        </div>
+      <TopWorkspacesCard workspaces={data.workspaces} workspacesRaw={data.workspacesRaw} />
+    </div>
+  );
+}
+
+// Renders data.workspaces, and data.workspacesRaw behind a toggle when the
+// server supplied it. The raw list was previously fetched and never displayed,
+// so the un-clamped per-workspace picture was unreachable from the UI.
+function TopWorkspacesCard({ workspaces, workspacesRaw }: {
+  workspaces: DashboardData["workspaces"];
+  workspacesRaw?: DashboardData["workspacesRaw"];
+}) {
+  const [mode, setMode] = useState<"active" | "raw">("active");
+  const hasRaw = !!workspacesRaw && workspacesRaw.length > 0;
+  const list = mode === "raw" && hasRaw ? workspacesRaw! : workspaces;
+
+  return (
+    <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3 gap-3">
+        <h3 className="text-sm font-medium text-[var(--text-secondary)]">Top workspaces</h3>
+        {hasRaw && (
+          <div className="flex gap-1 p-0.5 rounded-md bg-[var(--bg-tertiary)] border border-[var(--border)]">
+            <button
+              onClick={() => setMode("active")}
+              className={clsx("px-2 py-0.5 rounded text-[11px]", mode === "active" ? "bg-[var(--accent)]/15 text-[var(--accent)]" : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]")}
+              title="Ends clamped for aborted runs"
+            >
+              active
+            </button>
+            <button
+              onClick={() => setMode("raw")}
+              className={clsx("px-2 py-0.5 rounded text-[11px]", mode === "raw" ? "bg-[var(--accent)]/15 text-[var(--accent)]" : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]")}
+              title="Unclamped end times"
+            >
+              raw
+            </button>
+          </div>
+        )}
       </div>
+      <div className="space-y-2">
+        {list.slice(0, 12).map((ws) => (
+          <div key={ws.name} className="flex items-center gap-3 text-sm">
+            <FolderOpen size={14} className="text-[var(--text-secondary)] shrink-0" />
+            <span className="flex-1 truncate text-[var(--text-primary)]">{ws.name}</span>
+            <span className="text-xs text-[var(--text-secondary)]">{ws.sessions} sess</span>
+            <span className="text-xs text-[var(--text-secondary)] w-16 text-right">{ws.credits.toFixed(0)} cr</span>
+            <span className="text-sm font-medium w-16 text-right">{formatHours(ws.timeMs)}</span>
+          </div>
+        ))}
+        {list.length === 0 && (
+          <div className="text-xs text-[var(--text-secondary)]">No workspace activity recorded yet.</div>
+        )}
+      </div>
+      {hasRaw && (
+        <div className="text-[10px] text-[var(--text-secondary)] mt-3 pt-2 border-t border-[var(--border)]">
+          {mode === "active"
+            ? "Showing active time — ends clamped for aborted runs."
+            : "Showing raw time — unclamped end times, so aborted runs read longer."}
+        </div>
+      )}
     </div>
   );
 }
@@ -941,6 +1045,18 @@ function WeekDaysTable({ days, tz, locale }: { days: DailyStats[]; tz: string; l
   );
 }
 
+function AbortedBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className="shrink-0 px-1.5 py-[1px] rounded text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30"
+      title="Run did not finish normally. Its time is already clamped to the last recorded action, so the totals above are unaffected."
+    >
+      aborted{count > 1 ? ` ×${count}` : ""}
+    </span>
+  );
+}
+
 function DayExecutionsTable({ executions, tz, locale }: { executions: ExecutionRow[]; tz: string; locale: string }) {
   const bySession = useMemo(() => {
     const m = new Map<string, ExecutionRow[]>();
@@ -956,7 +1072,17 @@ function DayExecutionsTable({ executions, tz, locale }: { executions: ExecutionR
       sessionType: arr[0].sessionType,
       autonomyMode: arr[0].autonomyMode,
       workspace: arr[0].workspace,
-      totalMs: arr.reduce((s, r) => s + (r.end - r.start), 0),
+      // Merged, not summed: a session's own executions can overlap (parallel
+      // tool runs inside one session), and summing raw spans double-counted the
+      // overlap so a row could claim more time than its start→end window holds.
+      totalMs: mergedDurationMs(arr.map((r): [number, number] => [r.start, r.end])),
+      // The window must be min(start)→max(end). Taking the LAST-STARTING
+      // record's end (as this row used to) understates it whenever a later,
+      // shorter run is nested inside an earlier long one — which printed a
+      // window shorter than the total sitting next to it.
+      firstStart: Math.min(...arr.map((r) => r.start)),
+      lastEnd: Math.max(...arr.map((r) => r.end)),
+      abortedCount: arr.filter((r) => isAborted(r.status)).length,
     })).sort((a, b) => a.records[0].start - b.records[0].start);
   }, [executions]);
 
@@ -967,8 +1093,9 @@ function DayExecutionsTable({ executions, tz, locale }: { executions: ExecutionR
           <FacetDot name={s.sessionType} />
           <FacetDot name={s.autonomyMode} />
           <span className="truncate flex-1 text-[var(--text-primary)]">{s.title || "Untitled"}</span>
+          <AbortedBadge count={s.abortedCount} />
           <span className="text-[var(--text-secondary)] truncate max-w-[160px]">{s.workspace}</span>
-          <span className="text-[var(--text-secondary)]">{formatTimeInTz(s.records[0].start, tz, locale)} → {formatTimeInTz(s.records[s.records.length - 1].end, tz, locale)}</span>
+          <span className="text-[var(--text-secondary)]">{formatTimeInTz(s.firstStart, tz, locale)} → {formatTimeInTz(s.lastEnd, tz, locale)}</span>
           <span className="text-[var(--text-primary)] font-medium w-16 text-right">{formatHours(s.totalMs)}</span>
           <span className="text-[var(--text-secondary)] w-10 text-right">{s.records.length} ex</span>
         </div>
@@ -989,19 +1116,11 @@ function CalendarTab({ data, schedule, dailyMap }: { data: DashboardData; schedu
   const tz = schedule.timezone;
 
   const weekDays = useMemo(() => {
-    const todayKey = tzTodayKey(tz);
-    const [y, m, d] = todayKey.split("-").map(Number);
-    const today = new Date(y, m - 1, d);
-    const anchor = new Date(today);
-    anchor.setDate(today.getDate() - today.getDay() + weekOffset * 7);
-    return Array.from({ length: 7 }, (_, i) => {
-      const dd = new Date(anchor);
-      dd.setDate(anchor.getDate() + i);
-      const ys = dd.getFullYear();
-      const ms = String(dd.getMonth() + 1).padStart(2, "0");
-      const ds = String(dd.getDate()).padStart(2, "0");
-      return `${ys}-${ms}-${ds}`;
-    });
+    // UTC arithmetic on the day keys: the visible week must not shift with the
+    // browser's zone, and stepping by whole UTC days cannot be bitten by DST.
+    const todayMs = dayKeyToUtcMs(tzTodayKey(tz));
+    const anchorMs = addUtcDays(todayMs, -new Date(todayMs).getUTCDay() + weekOffset * 7);
+    return Array.from({ length: 7 }, (_, i) => utcMsToDayKey(addUtcDays(anchorMs, i)));
   }, [weekOffset, tz]);
 
   const weekDaysSet = useMemo(() => new Set(weekDays), [weekDays]);
@@ -1100,33 +1219,15 @@ function CalendarTab({ data, schedule, dailyMap }: { data: DashboardData; schedu
       }
     }
 
-    let wallRaw = 0;
-    if (rawIntervals.length) {
-      const sorted = rawIntervals.slice().sort((a, b) => a[0] - b[0]);
-      let curS = sorted[0][0], curE = sorted[0][1];
-      for (let i = 1; i < sorted.length; i++) {
-        const [a, b] = sorted[i];
-        if (a <= curE) { if (b > curE) curE = b; }
-        else { wallRaw += curE - curS; curS = a; curE = b; }
-      }
-      wallRaw += curE - curS;
-    }
-
-    function peak(intervals: [number, number][]): number {
-      if (!intervals.length) return 0;
-      const events: [number, number][] = [];
-      for (const [a, b] of intervals) { events.push([a, 1]); events.push([b, -1]); }
-      events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
-      let p = 0, cur = 0;
-      for (const [, d] of events) { cur += d; if (cur > p) p = cur; }
-      return p;
-    }
+    // Merge and peak both come from the single module-level implementations
+    // (mergedDurationMs / maxParallelFor) so every surface in this file agrees.
+    const wallRaw = mergedDurationMs(rawIntervals);
 
     return {
       totalSession, wall, insideMs, outsideMs,
       totalSessionRaw, wallRaw,
-      peakParallelActive: peak(activeIntervals),
-      peakParallelRaw: peak(rawIntervals),
+      peakParallelActive: maxParallelFor(activeIntervals),
+      peakParallelRaw: maxParallelFor(rawIntervals),
       clockIn, clockOut,
     };
   }, [weekDays, dailyMap, data.executions, tz]);
@@ -1202,8 +1303,8 @@ function CalendarTab({ data, schedule, dailyMap }: { data: DashboardData; schedu
         <StatCard icon={<Activity size={14} />} label="Peak parallel (raw)" value={String(weekStats.peakParallelRaw)} />
       </div>
       <div className="text-[11px] text-[var(--text-secondary)]">
-        <b>active</b> = aborted sessions clipped to last action + 60s.
-        <b> raw</b> = Kiro's original endTime (no clamping).
+        <b>active</b> = ends clamped for aborted runs (last recorded action + 60s).
+        <b> raw</b> = unclamped end times.
         <b> Peak parallel</b> = max executions open at the same moment this week.
       </div>
 
@@ -1830,12 +1931,18 @@ function FacetPanel({ title, data, total, compact }: { title: string; data: Reco
   const entries = Object.entries(data).sort((a, b) => b[1] - a[1]);
   const maxCount = Math.max(...entries.map(([, v]) => v), 1);
   const sliceLen = compact ? 6 : entries.length;
+  // Percentages are shares of THIS facet's classified sessions, not of every
+  // session. A facet's buckets need not cover the whole corpus (a session with
+  // no recorded model lands in no bucket), and dividing by totalSessions made
+  // the column silently sum to less than 100% with no explanation.
+  const bucketTotal = entries.reduce((sum, [, v]) => sum + v, 0);
+  const unclassified = Math.max(0, total - bucketTotal);
   return (
     <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-4">
       <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-3">{title}</h3>
       <div className="space-y-2.5">
         {entries.slice(0, sliceLen).map(([name, count]) => {
-          const pct = Math.round((count / Math.max(total, 1)) * 100);
+          const pct = Math.round((count / Math.max(bucketTotal, 1)) * 100);
           return (
             <div key={name}>
               <div className="flex items-center justify-between text-xs mb-1">
@@ -1854,6 +1961,10 @@ function FacetPanel({ title, data, total, compact }: { title: string; data: Reco
         {entries.length > sliceLen && (
           <div className="text-[10px] text-[var(--text-secondary)] pt-1">+ {entries.length - sliceLen} more</div>
         )}
+        <div className="text-[10px] text-[var(--text-secondary)] pt-1 border-t border-[var(--border)] mt-2">
+          % of {bucketTotal} classified session{bucketTotal === 1 ? "" : "s"}
+          {unclassified > 0 && <> · {unclassified} unclassified</>}
+        </div>
       </div>
     </div>
   );
@@ -1873,7 +1984,7 @@ function LongExecutionsPanel({ list, tz, locale }: { list: LongExecution[]; tz: 
       <div className="flex items-start gap-2">
         <AlertTriangle size={14} className="text-amber-400 mt-0.5 shrink-0" />
         <div className="flex-1">
-          <h3 className="text-sm font-medium">Long-running executions (over 4 hours)</h3>
+          <h3 className="text-sm font-medium">Long-running executions (over {LONG_EXECUTION_HOURS} hours)</h3>
           <p className="text-xs text-[var(--text-secondary)] mt-0.5">
             {list.length} execution{list.length === 1 ? "" : "s"} totalling {formatDuration(totalMs)}. <span className="text-[var(--text-primary)]">These are counted in all totals above.</span> Listed here so you can audit them — a single execution can legitimately be long if a spec task ran unattended overnight.
           </p>
@@ -1899,7 +2010,12 @@ function LongExecutionsPanel({ list, tz, locale }: { list: LongExecution[]; tz: 
                 <td className="py-1 pr-3 font-mono">{formatTimeInTz(r.end, tz, locale)} · {tzDateKey(tz, r.end)}</td>
                 <td className="py-1 pr-3 truncate max-w-[180px]">{r.workspace}</td>
                 <td className="py-1 pr-3 font-mono text-[var(--text-secondary)]">{r.executionId}</td>
-                <td className="py-1 text-[var(--text-secondary)]">{r.source}</td>
+                <td className="py-1 text-[var(--text-secondary)]">
+                  <span className="flex items-center gap-1.5">
+                    {r.source}
+                    <AbortedBadge count={isAborted(r.status) ? 1 : 0} />
+                  </span>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1926,32 +2042,12 @@ function WeekAudit({ weekDays, executions, tz, locale }: {
   locale: string;
 }) {
   const rows = useMemo(() => {
-    function peak(intervals: [number, number][]): number {
-      if (!intervals.length) return 0;
-      const events: [number, number][] = [];
-      for (const [a, b] of intervals) { events.push([a, 1]); events.push([b, -1]); }
-      events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
-      let p = 0, cur = 0;
-      for (const [, d] of events) { cur += d; if (cur > p) p = cur; }
-      return p;
-    }
-    function merge(intervals: [number, number][]): number {
-      if (!intervals.length) return 0;
-      const s = intervals.slice().sort((a, b) => a[0] - b[0]);
-      let total = 0, curS = s[0][0], curE = s[0][1];
-      for (let i = 1; i < s.length; i++) {
-        const [a, b] = s[i];
-        if (a <= curE) { if (b > curE) curE = b; }
-        else { total += curE - curS; curS = a; curE = b; }
-      }
-      return total + (curE - curS);
-    }
-
     return weekDays.map((dayKey) => {
       const [dayStart, dayEnd] = tzDayBoundariesUtc(tz, dayKey);
       const active: [number, number][] = [];
       const raw: [number, number][] = [];
       let execCount = 0;
+      let abortedCount = 0;
       let clockIn: number | null = null;
       let clockOut: number | null = null;
       for (const e of executions) {
@@ -1960,6 +2056,7 @@ function WeekAudit({ weekDays, executions, tz, locale }: {
         const touchesRaw = e.start < dayEnd && rawEnd > dayStart;
         if (!touchesActive && !touchesRaw) continue;
         execCount++;
+        if (isAborted(e.status)) abortedCount++;
         if (touchesActive) {
           const s = Math.max(e.start, dayStart);
           const f = Math.min(e.end, dayEnd);
@@ -1976,19 +2073,17 @@ function WeekAudit({ weekDays, executions, tz, locale }: {
         }
       }
       return {
-        dayKey, execCount, clockIn, clockOut,
-        activeMs: merge(active),
-        rawMs: merge(raw),
-        peakActive: peak(active),
-        peakRaw: peak(raw),
+        dayKey, execCount, abortedCount, clockIn, clockOut,
+        activeMs: mergedDurationMs(active),
+        rawMs: mergedDurationMs(raw),
+        peakActive: maxParallelFor(active),
+        peakRaw: maxParallelFor(raw),
       };
     });
   }, [weekDays, executions, tz]);
 
-  const weekdayShort = (dayKey: string) => {
-    const [y, m, d] = dayKey.split("-").map(Number);
-    return DAY_LABELS[new Date(y, m - 1, d).getDay()];
-  };
+  // UTC weekday from the day key — the browser's zone must not relabel a column.
+  const weekdayShort = (dayKey: string) => DAY_LABELS[dayKeyWeekday(dayKey)];
 
   return (
     <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg overflow-hidden">
@@ -1997,7 +2092,7 @@ function WeekAudit({ weekDays, executions, tz, locale }: {
           <Calendar size={13} /> Week audit (per day)
         </div>
         <div className="text-[10px] text-[var(--text-secondary)]">
-          active = clamped &middot; raw = Kiro's original endTime
+          active = ends clamped for aborted runs &middot; raw = unclamped end times
         </div>
       </div>
       <div className="overflow-x-auto">
@@ -2006,8 +2101,8 @@ function WeekAudit({ weekDays, executions, tz, locale }: {
             <tr className="border-b border-[var(--border)]">
               <th className="text-left px-3 py-2">Day</th>
               <th className="text-right px-2 py-2">Execs</th>
-              <th className="text-right px-2 py-2">Clock in</th>
-              <th className="text-right px-2 py-2">Clock out</th>
+              <th className="text-right px-2 py-2">First execution</th>
+              <th className="text-right px-2 py-2">Last execution</th>
               <th className="text-right px-2 py-2">Active</th>
               <th className="text-right px-2 py-2">Raw</th>
               <th className="text-right px-2 py-2">Peak // (active)</th>
@@ -2021,11 +2116,17 @@ function WeekAudit({ weekDays, executions, tz, locale }: {
                   <span className="text-[var(--text-secondary)] mr-1">{weekdayShort(r.dayKey)}</span>
                   <span className="font-medium">{r.dayKey.slice(5)}</span>
                 </td>
-                <td className="text-right px-2">{r.execCount || "—"}</td>
+                <td className="text-right px-2">
+                  <span className="inline-flex items-center gap-1.5 justify-end">
+                    {r.execCount || "—"}
+                    <AbortedBadge count={r.abortedCount} />
+                  </span>
+                </td>
                 <td className="text-right px-2">{r.clockIn ? formatTimeInTz(r.clockIn, tz, locale) : "—"}</td>
                 <td className="text-right px-2">{r.clockOut ? formatTimeInTz(r.clockOut, tz, locale) : "—"}</td>
                 <td className="text-right px-2 text-emerald-300">{r.activeMs ? formatDuration(r.activeMs) : "—"}</td>
-                <td className={clsx("text-right px-2", r.rawMs > r.activeMs * 2 && "text-amber-400")}>
+                {/* Flagged once raw exceeds active by RAW_VS_ACTIVE_FLAG_RATIO — aborted runs dominate that day. */}
+                <td className={clsx("text-right px-2", r.rawMs > r.activeMs * RAW_VS_ACTIVE_FLAG_RATIO && "text-amber-400")}>
                   {r.rawMs ? formatDuration(r.rawMs) : "—"}
                 </td>
                 <td className="text-right px-2">{r.peakActive || "—"}</td>
@@ -2048,30 +2149,41 @@ function WeekConcurrencyStrip({ weekDays, executions, tz }: {
   executions: ExecutionRow[];
   tz: string;
 }) {
-  const { minutes, peak } = useMemo(() => {
-    if (!weekDays.length) return { minutes: new Uint16Array(0), peak: 0 };
-    const [ys, ms, ds] = weekDays[0].split("-").map(Number);
-    const guessMs = Date.UTC(ys, ms - 1, ds);
-    const offsetMin = tzOffsetMinutes(tz, guessMs);
-    const weekStartMs = guessMs - offsetMin * 60_000;
+  const { minutes, bucketMax, exactPeak } = useMemo(() => {
+    if (!weekDays.length) return { minutes: new Uint16Array(0), bucketMax: 0, exactPeak: 0 };
+    const weekStartMs = dayKeyToUtcMs(weekDays[0]) - tzOffsetMinutes(tz, dayKeyToUtcMs(weekDays[0])) * 60_000;
     const totalMinutes = 7 * 24 * 60;
+    const weekEndMs = weekStartMs + totalMinutes * 60_000;
     const counts = new Uint16Array(totalMinutes);
+    // Exact intervals clipped to the week, for the true peak. The minute buckets
+    // below are a RENDERING grid: floor(start)/ceil(end) makes any run touch at
+    // least one whole minute, so two brief non-overlapping runs inside the same
+    // minute both occupy that bucket and the bucket reads 2-parallel when the
+    // real concurrency was 1. The caption must therefore quote the sweep, not
+    // the buckets.
+    const clipped: [number, number][] = [];
     for (const e of executions) {
       if (e.end <= weekStartMs) continue;
-      if (e.start >= weekStartMs + totalMinutes * 60_000) continue;
+      if (e.start >= weekEndMs) continue;
+      const s = Math.max(e.start, weekStartMs);
+      const f = Math.min(e.end, weekEndMs);
+      if (f > s) clipped.push([s, f]);
       const startMin = Math.max(0, Math.floor((e.start - weekStartMs) / 60_000));
       const endMin = Math.min(totalMinutes, Math.ceil((e.end - weekStartMs) / 60_000));
       for (let i = startMin; i < endMin; i++) counts[i]++;
     }
-    let p = 0;
-    for (let i = 0; i < totalMinutes; i++) if (counts[i] > p) p = counts[i];
-    return { minutes: counts, peak: p };
+    let bMax = 0;
+    for (let i = 0; i < totalMinutes; i++) if (counts[i] > bMax) bMax = counts[i];
+    return { minutes: counts, bucketMax: bMax, exactPeak: maxParallelFor(clipped) };
   }, [weekDays, executions, tz]);
 
   if (!minutes.length) return null;
 
   const totalMinutes = minutes.length;
   const dayWidthPct = 100 / 7;
+  // Bars are scaled against the bucket maximum so the tallest bar fills the
+  // strip; the headline number stays the exact peak.
+  const barScale = Math.max(bucketMax, 1);
 
   return (
     <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-3">
@@ -2079,14 +2191,14 @@ function WeekConcurrencyStrip({ weekDays, executions, tz }: {
         <div className="text-xs font-medium text-[var(--text-secondary)] flex items-center gap-2">
           <Activity size={13} /> Concurrent sessions, minute-by-minute (active)
         </div>
-        <div className="text-[10px] text-[var(--text-secondary)]">peak this week: {peak}</div>
+        <div className="text-[10px] text-[var(--text-secondary)]">peak this week: {exactPeak} (exact)</div>
       </div>
       <div className="relative">
         <div className="flex h-12 bg-[var(--bg-tertiary)] rounded overflow-hidden" style={{ position: "relative" }}>
           {Array.from({ length: totalMinutes }, (_, i) => {
             const c = minutes[i];
             if (!c) return null;
-            const opacity = peak > 0 ? 0.25 + 0.75 * (c / peak) : 0;
+            const opacity = 0.25 + 0.75 * (c / barScale);
             const leftPct = (i / totalMinutes) * 100;
             const widthPct = (1 / totalMinutes) * 100;
             return (
@@ -2096,10 +2208,10 @@ function WeekConcurrencyStrip({ weekDays, executions, tz }: {
                 style={{
                   left: `${leftPct}%`,
                   width: `${widthPct}%`,
-                  height: `${Math.max(6, (c / Math.max(peak, 1)) * 100)}%`,
+                  height: `${Math.max(6, (c / barScale) * 100)}%`,
                   opacity,
                 }}
-                title={`Minute ${i}: ${c} parallel exec${c === 1 ? "" : "s"}`}
+                title={`Minute ${i}: ${c} exec${c === 1 ? "" : "s"} touching this minute`}
               />
             );
           })}
@@ -2113,7 +2225,10 @@ function WeekConcurrencyStrip({ weekDays, executions, tz }: {
         </div>
       </div>
       <div className="text-[10px] text-[var(--text-secondary)] mt-1">
-        Brighter bar = more executions running in that minute. Hover any spike for the exact count.
+        Brighter bar = more executions touching that minute. Hover any spike for the exact count.
+        {bucketMax > exactPeak && (
+          <> Buckets crest at {bucketMax} because a minute counts every run touching it, including brief runs that never actually overlapped — the exact peak above is {exactPeak}.</>
+        )}
       </div>
     </div>
   );

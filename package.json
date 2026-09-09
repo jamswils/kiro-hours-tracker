@@ -7,9 +7,11 @@
   "scripts": {
     "dev": "vite",
     "server": "npx tsx server/index.ts",
-    "start": "concurrently \"npx tsx server/index.ts\" \"npm run dev\"",
+    "start": "concurrently \"npx tsx server/index.ts\" \"pnpm run dev\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.server.json && tsc -b",
     "preview": "vite preview",
     "verify": "node scripts/verify-scan.mjs"
   },
@@ -39,6 +41,8 @@
     "tsx": "^4.21.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
-    "vite": "^8.0.10"
-  }
+    "vite": "^8.0.10",
+    "vitest": "5.0.0"
+  },
+  "packageManager": "pnpm@9.15.9"
 }

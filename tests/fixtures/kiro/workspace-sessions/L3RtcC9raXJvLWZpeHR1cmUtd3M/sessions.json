@@ -1,0 +1,4 @@
+[
+  { "sessionId": "sess-alpha", "title": "Alpha session", "dateCreated": 1700000000000 },
+  { "sessionId": "sess-beta", "title": "Beta session", "dateCreated": 1700000300000 }
+]
